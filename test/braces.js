@@ -3,7 +3,7 @@
 const assert = require('assert');
 const fill = require('fill-range');
 const match = require('./support/match');
-const { isMatch } = require('..');
+const { isMatch, makeRe } = require('..');
 
 describe('braces', () => {
   it('should not match with brace patterns when disabled', () => {
@@ -209,5 +209,188 @@ describe('braces', () => {
     assert(!isMatch('foo/bar (42)', '*/* \\({4..10}\\)', { expandRange }));
     assert(!isMatch('foo/bar - copy [1]', '*/* \\({4..10}\\)', { expandRange }));
     assert(!isMatch('foo/bar - foo + bar - copy [1]', '*/* \\({4..10}\\)', { expandRange }));
+  });
+
+  it('should expand multi-digit integer ranges without a custom expandRange', () => {
+    assert(isMatch('1', '{1..10}'));
+    assert(isMatch('5', '{1..10}'));
+    assert(isMatch('10', '{1..10}'));
+    assert(!isMatch('0', '{1..10}'));
+    assert(!isMatch('11', '{1..10}'));
+
+    assert(isMatch('99', '{1..100}'));
+    assert(isMatch('100', '{1..100}'));
+    assert(!isMatch('101', '{1..100}'));
+
+    assert(isMatch('app-10.log', 'app-{1..10}.log'));
+    assert(!isMatch('app-01.log', 'app-{1..10}.log'));
+  });
+
+  it('should respect zero-padding widths in integer ranges', () => {
+    const range = '{01..10}';
+
+    for (const value of ['01', '02', '05', '09', '10']) {
+      assert(isMatch(value, range));
+    }
+
+    assert(!isMatch('1', range));
+    assert(!isMatch('00', range));
+    assert(!isMatch('11', range));
+    assert(!isMatch('001', range));
+
+    assert(isMatch('app-01.log', 'app-{01..10}.log'));
+    assert(isMatch('app-10.log', 'app-{01..10}.log'));
+    assert(!isMatch('app-1.log', 'app-{01..10}.log'));
+
+    assert(isMatch('001', '{001..100}'));
+    assert(isMatch('050', '{001..100}'));
+    assert(isMatch('100', '{001..100}'));
+    assert(!isMatch('000', '{001..100}'));
+    assert(!isMatch('1', '{001..100}'));
+  });
+
+  it('should support stepped integer ranges', () => {
+    assert.deepStrictEqual(match(['1', '2', '3', '4', '5', '6', '7', '8', '9', '10'], '{1..10..3}'), ['1', '4', '7', '10']);
+    assert.deepStrictEqual(match(['1', '2', '3', '4', '5'], '{10..1..3}'), ['1', '4']);
+
+    assert(isMatch('10', '{10..1..3}'));
+    assert(isMatch('7', '{10..1..3}'));
+    assert(isMatch('4', '{10..1..3}'));
+    assert(isMatch('1', '{10..1..3}'));
+    assert(!isMatch('8', '{10..1..3}'));
+
+    const weekly = 'app-{1..31..7}.log';
+    for (const day of [1, 8, 15, 22, 29]) {
+      assert(isMatch(`app-${day}.log`, weekly));
+    }
+
+    for (const day of [2, 7, 14, 30, 31]) {
+      assert(!isMatch(`app-${day}.log`, weekly));
+    }
+
+    assert.deepStrictEqual(match(['01', '02', '03', '04', '05', '06', '07', '08', '09', '10'], '{01..10..2}'), ['01', '03', '05', '07', '09']);
+  });
+
+  it('should support reverse ranges', () => {
+    for (const value of ['a', 'b', 'c', 'd', 'e']) {
+      assert(isMatch(value, '{e..a}'));
+    }
+
+    assert(!isMatch('f', '{e..a}'));
+
+    for (const value of ['10', '8', '6', '4', '2']) {
+      assert(isMatch(value, '{10..1..2}'));
+    }
+
+    assert(!isMatch('9', '{10..1..2}'));
+  });
+
+  it('should support single letter ranges', () => {
+    for (const value of ['a', 'b', 'c', 'd', 'e']) {
+      assert(isMatch(value, '{a..e}'));
+    }
+
+    assert(!isMatch('f', '{a..e}'));
+    assert(!isMatch('aa', '{a..e}'));
+
+    assert.deepStrictEqual(match(['a', 'b', 'c', 'd', 'e'], '{a..e..2}'), ['a', 'c', 'e']);
+    assert(isMatch('z', '{z..z}'));
+  });
+
+  it('should support negative and crossing-zero integer ranges', () => {
+    for (const value of ['-3', '-2', '-1', '0', '1', '2', '3']) {
+      assert(isMatch(value, '{-3..3}'));
+    }
+
+    assert(!isMatch('-4', '{-3..3}'));
+    assert(!isMatch('4', '{-3..3}'));
+
+    for (const value of ['-03', '-02', '-01', '000', '001', '002', '003']) {
+      assert(isMatch(value, '{-03..3}'));
+    }
+
+    assert(!isMatch('-3', '{-03..3}'));
+    assert(!isMatch('0', '{-03..3}'));
+
+    assert.deepStrictEqual(match(['-30', '-15', '0', '15'], '{-30..3..15}'), ['-30', '-15', '0']);
+  });
+
+  it('should compose expanded ranges with surrounding pattern parts', () => {
+    assert(isMatch('a1', '{a..c}{1..3}'));
+    assert(isMatch('c3', '{a..c}{1..3}'));
+    assert(!isMatch('d1', '{a..c}{1..3}'));
+    assert(!isMatch('a4', '{a..c}{1..3}'));
+
+    assert(isMatch('a1b2c3', 'a{1..2}b{1..3}c{2..4}'));
+    assert(!isMatch('a3b2c3', 'a{1..2}b{1..3}c{2..4}'));
+
+    assert(isMatch('app-07/app-22.log', 'app-{01..10}/app-{01..31}.log'));
+    assert(!isMatch('app-11/app-22.log', 'app-{01..10}/app-{01..31}.log'));
+  });
+
+  it('should treat invalid bash ranges as literal characters', () => {
+    assert(isMatch('{a..1}', '{a..1}'));
+    assert(isMatch('{1..a}', '{1..a}'));
+    assert(isMatch('{1...5}', '{1...5}'));
+    assert(isMatch('{..5}', '{..5}'));
+    assert(isMatch('{1..}', '{1..}'));
+    assert(isMatch('{z..ab}', '{z..ab}'));
+    assert(isMatch('{1..10..}', '{1..10..}'));
+    assert(isMatch('{1..10..a}', '{1..10..a}'));
+
+    // Invalid ranges never behave like ranges.
+    assert(!isMatch('1', '{a..1}'));
+    assert(!isMatch('a', '{a..1}'));
+    assert(!isMatch('10', '{1..10..a}'));
+    assert.doesNotThrow(() => isMatch('whatever', '{a..1}'));
+  });
+
+  it('should keep braces literal when nobrace is enabled', () => {
+    assert(isMatch('{1..10}', '{1..10}', { nobrace: true }));
+    assert(!isMatch('1', '{1..10}', { nobrace: true }));
+    assert(isMatch('{a..e}', '{a..e}', { nobrace: true }));
+    assert(!isMatch('c', '{a..e}', { nobrace: true }));
+  });
+
+  it('should compile very large ranges to compact regular expressions', () => {
+    const re = makeRe('{1..100000}');
+
+    assert(re.source.length < 1024);
+    assert(isMatch('1', '{1..100000}'));
+    assert(isMatch('5000', '{1..100000}'));
+    assert(isMatch('99999', '{1..100000}'));
+    assert(isMatch('100000', '{1..100000}'));
+    assert(!isMatch('0', '{1..100000}'));
+    assert(!isMatch('100001', '{1..100000}'));
+
+    const padded = makeRe('{000001..100000}');
+    assert(padded.source.length < 1024);
+    assert(isMatch('000001', '{000001..100000}'));
+    assert(isMatch('100000', '{000001..100000}'));
+    assert(!isMatch('1', '{000001..100000}'));
+
+    // Large stepped ranges must not be enumerated into huge regexes.
+    const stepped = makeRe('{1..1000000000..2}');
+    assert(stepped.source.length < 1024);
+  });
+
+  it('should fall back to literal text for ranges that are too large to enumerate', () => {
+    assert(isMatch('{1..1000000..2}', '{1..1000000..2}'));
+    assert(!isMatch('4', '{1..1000000..2}'));
+  });
+
+  it('should treat mixed-case letter ranges as literal characters', () => {
+    assert(isMatch('{A..e}', '{A..e}'));
+    assert(!isMatch('B', '{A..e}'));
+    assert(isMatch('B', '{A..E}'));
+    assert(isMatch('b', '{a..e}'));
+  });
+
+  it('should defer to the expandRange option when provided', () => {
+    const expandRange = (a, b) => `(${fill(a, b, { toRegex: true })})`;
+
+    assert(isMatch('a/99', 'a/{1..100}', { expandRange }));
+    assert(isMatch('a/100', 'a/{1..100}', { expandRange }));
+    assert(!isMatch('a/101', 'a/{1..100}', { expandRange }));
   });
 });
